@@ -11,8 +11,12 @@ COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.14-slim
-# Nothing is installed at run time, so pip (and what it vendors) leaves the image.
-RUN python -m pip uninstall --yes --quiet pip \
+# Take the distribution's security fixes that landed after the base image was built: the vulnerability scan in CI
+# fails on fixable HIGH findings. Nothing is installed at run time, so pip (and what it vendors) leaves the image.
+RUN apt-get update \
+    && apt-get upgrade --yes --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall --yes --quiet pip \
     && useradd --system --uid 10001 --home-dir /app ratchet
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
