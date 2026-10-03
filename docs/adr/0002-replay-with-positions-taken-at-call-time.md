@@ -27,8 +27,14 @@ Each recorded outcome carries the kind of call and the activity name. A replay t
 raises `NonDeterminismError`. ADR 6 covers what happens then.
 
 Results are stored as JSON through the activity's return annotation (a pydantic `TypeAdapter`), and the live run gets
-back the same validated JSON a replay would. A function returning a tuple returns a tuple on the first run and on every
-replay, rather than a tuple once and a list forever after.
+back what the database stored, validated the same way a replay validates it. Two things depend on that. A function
+returning a tuple returns a tuple on the first run and on every replay, rather than a tuple once and a list forever
+after. And a dict comes back with its keys in jsonb's order (shorter keys first) every time: jsonb does not keep the
+order they were written in. Before this was fixed, a workflow iterating a dict saw one order live and another on
+replay, and so processed one key twice and the other never
+(`test_a_dict_result_has_the_same_key_order_live_and_on_replay`).
+`ctx.now()` and every recorded deadline come back in UTC for the same reason: a timestamp formatted with one offset
+live and another on replay is a different string.
 
 ## Consequences
 

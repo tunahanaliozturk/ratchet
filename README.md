@@ -36,7 +36,9 @@ That is [examples/orders.py](examples/orders.py), and it is what the compose sta
 | A worker killed with SIGKILL mid-activity loses nothing recorded, and only the interrupted step runs again | `tests/integration/test_kill.py`: a real worker process, killed, and a second process finishing the job |
 | A worker whose lease was taken over cannot record anything, however late it wakes | `test_a_worker_whose_lease_was_taken_over_cannot_record_anything`, `test_every_fenced_write_refuses_a_stale_fence` |
 | A signal arriving between "is there a signal?" and "then I'll sleep" is not lost | `test_a_signal_landing_between_the_check_and_the_park_is_not_lost` |
-| A database outage never marks a workflow failed | `test_losing_the_database_mid_step_leaves_the_workflow_for_another_run_instead_of_failing_it` |
+| A database outage never marks a workflow failed, and a value Postgres refuses fails it once instead of retrying forever | `test_losing_the_database_mid_step_leaves_the_workflow_for_another_run_instead_of_failing_it`, `test_a_value_postgres_refuses_fails_the_workflow_once_instead_of_looping` |
+| A branch waiting on a timer or signal never cuts off a sibling's activity halfway | `test_a_parked_branch_does_not_cut_off_a_sibling_activity` |
+| A replay sees exactly the values the live run saw, down to dict key order and time-zone offsets | `test_a_dict_result_has_the_same_key_order_live_and_on_replay`, `test_now_is_utc_on_the_live_run_and_on_replay_whatever_the_database_time_zone` |
 | Code that no longer matches a workflow's history parks it until a fix is deployed, instead of failing it | `test_changed_code_stalls_the_workflow_instead_of_failing_it_and_a_fix_resumes_it` |
 
 Activities themselves are **at-least-once**: a crash after an activity's side effect and before its outcome is
@@ -54,6 +56,10 @@ On a laptop (Core Ultra 7 255H, Postgres 18 in Docker Desktop, four worker proce
 | draining 5,000 three-step workflows | 896 workflows/s, 2,689 steps/s |
 | 200 workflows/s, open loop, start to finish | p50 22 ms, p95 100 ms, p99 203 ms |
 | replaying a recorded history on wake | 1.3 microseconds per step |
+
+Before the first release, a review set on breaking it found twelve problems, nine of them
+confirmed by probes. Each fix came with a test that failed before it; they are collected in
+`tests/integration/test_edge_cases.py` and `tests/unit/test_edge_cases.py`.
 
 The first run of that benchmark measured 331 workflows a second and also found a real bug: a connection-pool
 exhaustion that permanently failed workflows. Both fixes, and the before and after, are in
@@ -119,6 +125,10 @@ The rules are few, and they matter:
 - **Do I/O in activities.** Register them with `@registry.activity(retry=RetryPolicy(...), timeout=...)`. Arguments are
   not recorded, results are, as JSON through the return annotation.
 - **Raise `NonRetryableError`** (or a subclass) from an activity to fail it without spending its retries.
+- **Results come back as stored.** A dict's keys come back in jsonb's order (shorter keys first), times in UTC. That
+  is the same on every run, which is what matters, but do not rely on the order an activity built a dict in.
+- **Signals are validated against `payload_type`.** A payload that does not fit is set aside (`rejected_at` in
+  `ratchet_signals`) and the wait carries on, so a malformed request cannot fail a workflow.
 - **Never catch `BaseException` in a workflow.** The engine unwinds runs with `BaseException`s (parking, a lost lease, a
   database outage) and they must pass through. [ADR 7](docs/adr/0007-engine-interrupts-are-base-exceptions.md)
 - **To change a workflow with running instances**, only add calls after the point every instance has reached, or

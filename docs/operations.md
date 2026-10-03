@@ -17,7 +17,7 @@ workflows stall (ADR 6).
 |---|---|---|
 | `RATCHET_DATABASE_URL` | required | `postgresql://user:password@host:port/db` |
 | `RATCHET_APP` | required | `module:attribute` of the Registry |
-| `RATCHET_API_TOKEN` | required for `api` | bearer token, compared in constant time; there is no anonymous mode |
+| `RATCHET_API_TOKEN` | required for `api` | bearer token, at least 16 characters, compared in constant time; there is no anonymous mode |
 | `RATCHET_CONCURRENCY` | 32 | workflows one worker runs at once |
 | `RATCHET_POOL_SIZE` | 10 | Postgres connections per process (minimum 3: listener, claim loop, writes) |
 | `RATCHET_LEASE_SECONDS` | 30 | how long a crashed worker's workflows wait before another worker takes them; heartbeats run at a third of this |
@@ -39,6 +39,7 @@ otherwise.
 |---|---|---|
 | `ratchet.runs{outcome="stalled"}` | a deploy left workflows that no worker can replay (ADR 6) | any, for 10 minutes |
 | `ratchet.runs{outcome="journal_unavailable"}` | runs that could not record; the database is struggling | sustained above zero |
+| `ratchet.runs{outcome="crashed"}` | a run hit an error that is neither the workflow's nor an outage: a bug, logged with its traceback | any |
 | `ratchet.leases.lost` | runs abandoned because another worker took over; activities are running twice | rate above the usual baseline (it should be near zero) |
 | `ratchet.workflows.finished{status="failed"}` | business failures | per workflow type, against your own expectation |
 | `ratchet.step.duration` per activity | slow dependencies | p99 above the activity's timeout divided by two |
@@ -60,6 +61,10 @@ database is back. Nothing is marked failed because of an outage.
 
 **Backlog growing.** Add workers, or raise `RATCHET_CONCURRENCY` if the activities are I/O-bound. Check connections
 first: more workers means more connections.
+
+**A workflow ignores a signal.** Check whether it was rejected: `select id, payload, rejected_at from ratchet_signals
+where workflow_id = '...' order by id`. A rejected signal's payload did not validate against the type the workflow
+waits for. Send a corrected one; the workflow is still waiting.
 
 **Cancelling a lot of workflows.** `POST /v1/workflows/{id}/cancel` per workflow. Each sees `WorkflowCancelled` at its
 next durable call and runs its compensations.

@@ -1,17 +1,22 @@
 """Fails when any installed distribution is not under a permissive licence, at any depth of the tree.
 
 It reads the metadata of what is installed rather than asking a web service, so it gives the same answer offline and
-in CI. The order of evidence is PEP 639 License-Expression, then the License field, then the trove classifiers.
-A distribution whose licence cannot be determined fails too: somebody has to look at it and record why it is fine.
+in CI. The order of evidence is PEP 639 License-Expression, then the License field, then the trove classifiers, and
+last, for a distribution with no licence metadata at all, the text of the licence file it bundles.
+A distribution whose licence still cannot be determined fails: somebody has to look at it and record why it is fine.
 """
 
 import re
 import sys
 from importlib.metadata import Distribution, distributions
+from pathlib import Path
+
+PROJECT = "ratchet"
 
 ALLOWED = {
     "MIT",
     "MIT-0",
+    "MIT-CMU",  # the Pillow licence: OSI-approved, permissive, attribution only
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
@@ -24,6 +29,7 @@ ALLOWED = {
     "PSF-2.0",
     "Python-2.0",
     "CC0-1.0",
+    "Zlib",
 }
 
 # Free-text License fields and classifiers, mapped to the SPDX identifier they mean.
@@ -53,38 +59,63 @@ ALIASES = {
     "mit or apache-2.0": "MIT",
 }
 
+# Text that identifies a licence file beyond doubt, for packages that ship the file but no metadata.
+LICENCE_TEXT = {
+    "Permission is hereby granted, free of charge, to any person obtaining a copy": "MIT",
+    "Version 2.0, January 2004": "Apache-2.0",
+}
+
 # Reviewed by hand. Each entry says why, so the exception can be challenged later.
 REVIEWED: dict[str, str] = {}
 
 _CLASSIFIER = re.compile(r"^License :: OSI Approved :: (.+)$")
+_SHORT = 80  # a License field longer than this is the whole licence text, not a name
 
 
 def _spdx_terms(expression: str) -> set[str]:
-    """Every licence an SPDX expression names. For OR, one allowed term is enough, which the caller decides."""
-    return {t for t in re.split(r"\s+(?:AND|OR|WITH)\s+|[()]", expression) if t.strip()}
+    return {t.strip() for t in re.split(r"\s+(?:AND|OR|WITH)\s+|[()]", expression) if t.strip()}
+
+
+def _allowed_expression(expression: str) -> bool:
+    """For OR, one allowed term is enough; otherwise every term must be allowed."""
+    terms = _spdx_terms(expression)
+    return bool(terms & ALLOWED) if " OR " in expression else terms <= ALLOWED
+
+
+def _bundled(dist: Distribution) -> str | None:
+    for file in dist.files or []:
+        if "licen" not in file.name.lower():
+            continue
+        path = Path(str(file.locate()))
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        for marker, spdx in LICENCE_TEXT.items():
+            if marker in text:
+                return spdx
+    return None
 
 
 def verdict(dist: Distribution) -> tuple[bool, str]:
     meta = dist.metadata
     name = meta["Name"]
-    if name.lower() in REVIEWED:
-        return True, f"reviewed: {REVIEWED[name.lower()]}"
     expression = meta.get("License-Expression")
-    if expression:
-        terms = _spdx_terms(expression)
-        if " OR " in expression:
-            return bool(terms & ALLOWED), expression
-        return terms <= ALLOWED, expression
     field = (meta.get("License") or "").strip()
-    if field and "\n" not in field and len(field) < 80:  # longer means the whole licence text
-        spdx = ALIASES.get(field.lower(), field)
-        if spdx in ALLOWED:
-            return True, spdx
+    if field and ("\n" in field or len(field) >= _SHORT):
+        field = ""
     classifiers = [m.group(1) for c in meta.get_all("Classifier") or [] if (m := _CLASSIFIER.match(c))]
-    mapped = {ALIASES.get(c.lower(), c) for c in classifiers}
-    if mapped and mapped <= ALLOWED:
-        return True, ", ".join(sorted(mapped))
-    return False, expression or field[:60] or ", ".join(classifiers) or "no licence metadata"
+
+    if name.lower() in REVIEWED:
+        found: tuple[bool, str] = (True, f"reviewed: {REVIEWED[name.lower()]}")
+    elif expression:
+        found = (_allowed_expression(expression), expression)
+    elif field and _allowed_expression(ALIASES.get(field.lower(), field)):
+        found = (True, field)
+    elif classifiers and {ALIASES.get(c.lower(), c) for c in classifiers} <= ALLOWED:
+        found = (True, ", ".join(sorted(classifiers)))
+    elif not (field or classifiers) and (bundled := _bundled(dist)):
+        found = (True, f"{bundled}, recognised from the bundled licence file")
+    else:
+        found = (False, field[:60] or ", ".join(classifiers) or "no licence metadata")
+    return found
 
 
 def main() -> int:
@@ -92,7 +123,7 @@ def main() -> int:
     seen = set()
     for dist in sorted(distributions(), key=lambda d: d.metadata["Name"].lower()):
         name = dist.metadata["Name"]
-        if name.lower() in seen or name.lower() == "ratchet":
+        if name.lower() in seen or name.lower() == PROJECT:
             continue
         seen.add(name.lower())
         ok, evidence = verdict(dist)

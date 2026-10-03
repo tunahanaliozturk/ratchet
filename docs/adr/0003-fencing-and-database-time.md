@@ -13,8 +13,9 @@ get the same answer everywhere.
 
 Every claim increments `fence` on the workflow row and hands the new value to the worker. Every write a run makes checks
 `fence = $mine and status = 'running'` against the row, locked `FOR SHARE`, in the same statement or transaction as the
-write. A takeover needs a stronger lock, so it waits for that write to commit and then bumps the fence. Any later write
-by the old worker finds the wrong fence and raises `LeaseLost`. The primary key on `(workflow_id, seq)` is a second line
+write. A claim takes its rows with `FOR UPDATE SKIP LOCKED`, so while that write holds the row a takeover skips it, and
+it gets the row on a later pass, after the write has committed, with the fence bumped. Any later write by the old
+worker finds the wrong fence and raises `LeaseLost`. The primary key on `(workflow_id, seq)` is a second line
 of defence: if two writers ever reached the same position, one insert would fail.
 
 All time comes from `now()` in Postgres: lease expiry, timer deadlines, retry times, `ctx.now()`. The worker's clock is

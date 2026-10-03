@@ -21,5 +21,10 @@ checks it with a real process killed in the middle of an activity.
 - The README and the docstrings say "at-least-once" wherever a reader might assume otherwise.
 - The property test measures the window precisely: a sequential step runs exactly once more for each crash that hit
   after its effect and before its record, and never more than that.
-- Parallel branches can repeat a little more. When one branch dies its siblings are cancelled, and a sibling cancelled
-  after its effect but before its record runs again. The test bounds this instead of pretending it away.
+- Parallel branches can repeat a little more. When one branch crashes or fails, `asyncio.TaskGroup` cancels its
+  siblings, and a sibling cancelled after its effect but before its record runs again. The test bounds this instead of
+  pretending it away.
+- A branch that merely parks (a timer, a signal, a retry backoff) never cuts a sibling off. It waits until no branch is
+  in the middle of a live call, then the run unwinds once with every parked branch's wake condition
+  (`test_a_parked_branch_does_not_cut_off_a_sibling_activity`). An earlier version unwound at once, and a branch
+  waiting on a one-second signal timeout next to a ten-second activity restarted that activity every second.
