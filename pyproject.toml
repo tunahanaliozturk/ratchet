@@ -1,0 +1,114 @@
+[project]
+name = "ratchet"
+version = "0.1.0"
+description = "Durable workflows for async Python, with Postgres as the only moving part"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Tunahan Ali Ozturk" }]
+requires-python = ">=3.14"
+dependencies = [
+    "asyncpg>=0.31.0",
+    "fastapi>=0.142.2",
+    "opentelemetry-api>=1.45.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.0",
+    "opentelemetry-sdk>=1.45.0",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "structlog>=26.1.0",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+ratchet = "ratchet.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "hypothesis>=6.168.3",
+    "import-linter>=2.15",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.10",
+    "testcontainers>=4.15.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ratchet"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [".claude"]
+target-version = "py314"
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RET", "PTH", "ARG", "PL", "RUF", "S", "DTZ", "T20", "ASYNC"]
+ignore = [
+    "PLR0913", # the store's write methods take the fencing arguments explicitly
+    "N818",    # exceptions are named for what happened (WorkflowCancelled, LeaseLost), not suffixed with Error
+    "ASYNC109", # wait() and wait_for_signal() take a timeout because that is their meaning
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ratchet", "examples", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "S105", "S106", "S311", "PLR0915", "ARG"]
+"benchmarks/**" = ["S101", "T20", "PLR2004", "S311"]
+"tools/**" = ["T20", "PLR2004", "S105"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header", "fastapi.Body"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+mypy_path = "src"
+packages = ["ratchet"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "testcontainers.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["--strict-markers", "-ra"]
+xfail_strict = true
+filterwarnings = ["error"]
+
+[tool.importlinter]
+root_package = "ratchet"
+include_external_packages = true
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Replay logic is pure: the workflow context knows nothing about Postgres or HTTP"
+type = "forbidden"
+source_modules = ["ratchet.context", "ratchet.definitions", "ratchet.saga", "ratchet.errors"]
+forbidden_modules = ["ratchet.store", "ratchet.worker", "ratchet.api", "ratchet.client", "asyncpg", "fastapi"]
+
+[[tool.importlinter.contracts]]
+name = "Layers: entry points on top, the store at the bottom"
+type = "layers"
+layers = [
+    "ratchet.cli",
+    "ratchet.api",
+    "ratchet.worker | ratchet.client",
+    "ratchet.store | ratchet.migrate",
+    "ratchet.saga",
+    "ratchet.context",
+    "ratchet.definitions",
+    "ratchet.errors | ratchet.telemetry | ratchet.settings",
+]

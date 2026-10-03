@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.benchmarks/
+.coverage
+htmlcov/
+.env
+dist/
+var/
+.claude/
+.hypothesis/
+.import_linter_cache/
