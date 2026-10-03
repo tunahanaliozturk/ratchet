@@ -7,7 +7,7 @@ x-ratchet: &ratchet
   environment: &env
     RATCHET_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/ratchet
     RATCHET_APP: examples.orders:registry
-    RATCHET_API_TOKEN: local-dev-token
+    RATCHET_API_TOKEN: local-development-token
 
 services:
   postgres:

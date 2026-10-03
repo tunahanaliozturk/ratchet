@@ -13,9 +13,10 @@ from datetime import timedelta
 from typing import Any
 
 import structlog
+from pydantic import ValidationError
 
 from ratchet import telemetry
-from ratchet.context import RunState, WorkflowContext
+from ratchet.context import RunState, WorkflowContext, clean
 from ratchet.definitions import Json, Registry
 from ratchet.errors import (
     ActivityError,
@@ -24,6 +25,7 @@ from ratchet.errors import (
     NonDeterminismError,
     Suspend,
     UnknownWorkflow,
+    UnstorableValue,
     Wakeup,
     WorkflowCancelled,
 )
@@ -61,10 +63,10 @@ type _Outcome = _Completed | _Failed | _Cancelled | _Stalled | Wakeup
 
 
 def _describe(exc: BaseException) -> dict[str, Json]:
-    error: dict[str, Json] = {"type": type(exc).__qualname__, "message": str(exc)}
+    error: dict[str, Json] = {"type": type(exc).__qualname__, "message": clean(str(exc))}
     if isinstance(exc, ActivityError):
         error |= {"activity": exc.activity, "activity_error": exc.error_type, "attempts": exc.attempts}
-    error["traceback"] = "".join(traceback.format_exception(exc))[-_MAX_TRACEBACK:]
+    error["traceback"] = clean("".join(traceback.format_exception(exc))[-_MAX_TRACEBACK:])
     return error
 
 
@@ -141,6 +143,8 @@ class Worker:
 
     async def _idle(self, stop: asyncio.Event, *, busy: bool) -> None:
         timeout = self._idle_wait_max
+        # Clear first: a NOTIFY that lands while we ask the database when work is due must still wake us.
+        self._due.clear()
         if not busy:
             try:
                 until = await self._store.seconds_until_due()
@@ -148,7 +152,6 @@ class Worker:
                 until = None
             if until is not None:
                 timeout = min(timeout, max(until, 0.0))
-        self._due.clear()
         waiters = {asyncio.ensure_future(self._due.wait()), asyncio.ensure_future(stop.wait())}
         try:
             await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
@@ -198,6 +201,11 @@ class Worker:
                 raise
             telemetry.leases_lost.add(1)
             log.warning("lease lost during an activity, run cancelled")
+        except Exception:
+            # A bug in the engine or in the database schema, not in the workflow. Recording anything could make it
+            # worse, so record nothing: the lease runs out, another run tries again, and this log says why.
+            telemetry.runs.add(1, {"outcome": "crashed"})
+            log.exception("run crashed; the workflow will be retried after its lease")
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -210,7 +218,7 @@ class Worker:
             await asyncio.sleep(interval)
             try:
                 alive = await journal.heartbeat()
-            except Exception:  # a blip; the lease has two more intervals before it runs out
+            except Exception, JournalUnavailable:  # a blip; the lease has two more intervals before it runs out
                 log.warning("heartbeat failed", exc_info=True)
                 continue
             if not alive:
@@ -222,10 +230,12 @@ class Worker:
         claim = journal.claim
         state = journal.first_state() or await journal.load()
         while True:
-            outcome = await self._replay(claim, state, journal)
+            outcome, cancel_delivered = await self._replay(claim, state, journal)
             match outcome:
                 case Wakeup(wake_at=wake_at, signals=signals):
-                    if await journal.suspend(wake_at, signals):
+                    # A run that recorded a cancel but was unwound by a sibling's suspension before raising it must
+                    # not park: the cancel would then wait out the sibling's timer. Re-reading delivers it.
+                    if not cancel_delivered and await journal.suspend(wake_at, signals):
                         telemetry.runs.add(1, {"outcome": "suspended"})
                         log.debug("suspended", wake_at=wake_at, signals=sorted(signals))
                         return
@@ -234,12 +244,20 @@ class Worker:
                     claim = journal.claim
                 case _Stalled(error=error):
                     retry_at = state.now + STALLED_RETRY
-                    await journal.suspend(retry_at, frozenset(), error)
+                    if not await journal.suspend(retry_at, frozenset(), error):
+                        state = await journal.load()  # a signal raced in; it may change nothing, but look
+                        claim = journal.claim
+                        continue
                     telemetry.runs.add(1, {"outcome": "stalled"})
                     log.error("workflow stalled", error=error["message"], retry_at=retry_at)
                     return
                 case _Completed(value=value):
-                    await journal.finish("completed", value, None)
+                    try:
+                        await journal.finish("completed", value, None)
+                    except UnstorableValue as exc:
+                        await journal.finish("failed", None, _describe(exc))
+                        self._final("failed", error=str(exc))
+                        return
                     self._final("completed")
                     return
                 case _Failed(error=error):
@@ -257,35 +275,45 @@ class Worker:
         telemetry.workflows_finished.add(1, {"status": status})
         log.info(f"workflow {status}", **fields)
 
-    async def _replay(self, claim: Claim, state: RunState, journal: RunJournal) -> _Outcome:  # noqa: PLR0911
+    async def _replay(self, claim: Claim, state: RunState, journal: RunJournal) -> tuple[_Outcome, bool]:
+        """Run the workflow function once. Returns where it ended up, and whether this run delivered a cancel."""
         try:
             definition = self._registry.get_workflow(claim.name)
         except UnknownWorkflow as exc:
-            return _Stalled({"type": "UnknownWorkflow", "message": f"this worker does not know workflow {exc}"})
-        if len(state.history) > self._max_history:
-            return _Failed({"type": "HistoryTooLong", "message": f"more than {self._max_history} recorded events"})
-
-        ctx = WorkflowContext(state, journal)
-        started = time.perf_counter()
+            return _Stalled({"type": "UnknownWorkflow", "message": f"this worker does not know workflow {exc}"}), False
         try:
-            value = await definition.fn(ctx, definition.input.validate_python(claim.input))
+            workflow_input = definition.input.validate_python(claim.input)
+        except ValidationError as exc:
+            # The input was valid when the workflow started, so the code's input type changed under it: a deploy
+            # problem, like non-determinism, and handled the same way.
+            return _Stalled(_describe(exc)), False
+
+        ctx = WorkflowContext(state, journal, max_history=self._max_history)
+        started = time.perf_counter()
+        outcome: _Outcome
+        try:
+            value = await definition.fn(ctx, workflow_input)
+            outcome = self._returned(ctx, definition.result.dump_python(value, mode="json"))
         except Suspend as suspension:
-            return Wakeup.merge([suspension])
+            outcome = Wakeup.merge([suspension])
         except WorkflowCancelled:
-            return _Cancelled()
+            outcome = _Cancelled()
         except NonDeterminismError as exc:
-            return _Stalled(_describe(exc))
-        except Exception as exc:  # anything else the workflow raised is its result
-            return self._from_group(exc) if isinstance(exc, ExceptionGroup) else _Failed(_describe(exc))
+            outcome = _Stalled(_describe(exc))
+        except Exception as exc:  # whatever the workflow raised, or a result that will not serialise, is its result
+            outcome = self._from_group(exc) if isinstance(exc, ExceptionGroup) else _Failed(_describe(exc))
         except BaseExceptionGroup as group:
-            return self._from_group(group)
+            outcome = self._from_group(group)
         finally:
             log.debug("replayed", seconds=round(time.perf_counter() - started, 4), history=len(state.history))
+        return outcome, ctx.cancel_delivered
 
+    @staticmethod
+    def _returned(ctx: WorkflowContext, value: Json) -> _Outcome:
         unreached = ctx.unreached_history()
         if unreached:
             return _Stalled(_describe(NonDeterminismError(unreached[0], "an event", "nothing (the workflow returned)")))
-        return _Completed(definition.result.dump_python(value, mode="json"))
+        return _Completed(value)
 
     @staticmethod
     def _from_group(group: BaseExceptionGroup[BaseException]) -> _Outcome:

@@ -12,7 +12,7 @@ import uuid
 from typing import Any
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8200"
-TOKEN = "local-dev-token"
+TOKEN = "local-development-token"
 
 
 def call(method: str, path: str, body: Any = None, *, token: str | None = TOKEN) -> tuple[int, Any]:

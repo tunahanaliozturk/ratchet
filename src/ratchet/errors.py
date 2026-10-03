@@ -68,6 +68,17 @@ class JournalUnavailable(EngineInterrupt):
     """The database could not record an outcome. The run stops, the lease runs out, and another run retries."""
 
 
+class HistoryTooLong(RatchetError):
+    """The workflow tried to record more events than ``RATCHET_MAX_HISTORY`` allows."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"the history reached its limit of {limit} events")
+
+
+class UnstorableValue(RatchetError):
+    """Postgres refused a value (a NUL character in a string, for one). It is the workflow's problem, not an outage."""
+
+
 class UnknownWorkflow(RatchetError):
     """No workflow with that name is registered."""
 

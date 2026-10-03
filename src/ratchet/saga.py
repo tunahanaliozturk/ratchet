@@ -9,6 +9,14 @@ from ratchet.definitions import Activity
 from ratchet.errors import ActivityError
 
 
+def _failed(exc: BaseException | None) -> bool:
+    """A real failure, as opposed to the engine unwinding the run. A TaskGroup can mix the two in one group (one branch
+    failed while another parked), and that still counts as a failure: what the failed branch did must be undone."""
+    if isinstance(exc, BaseExceptionGroup):
+        return exc.split(Exception)[0] is not None
+    return isinstance(exc, Exception)
+
+
 class CompensationFailed(ActivityError):
     """One or more compensations failed too. The workflow needs a person; the history says which ones."""
 
@@ -41,7 +49,7 @@ class Saga:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        if exc is None or not isinstance(exc, Exception):
+        if not _failed(exc):
             return  # success, or a suspension unwinding the coroutine: nothing to undo
         failures: list[ActivityError] = []
         for undo in reversed(self._undo):

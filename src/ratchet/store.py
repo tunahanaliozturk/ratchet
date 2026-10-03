@@ -20,7 +20,14 @@ import asyncpg
 
 from ratchet.context import Event, RetryState, RunState
 from ratchet.definitions import Json
-from ratchet.errors import JournalUnavailable, LeaseLost, WorkflowFinished, WorkflowIdConflict, WorkflowNotFound
+from ratchet.errors import (
+    JournalUnavailable,
+    LeaseLost,
+    UnstorableValue,
+    WorkflowFinished,
+    WorkflowIdConflict,
+    WorkflowNotFound,
+)
 
 CHANNEL = "ratchet_due"
 FINAL = ("completed", "failed", "cancelled")
@@ -103,7 +110,18 @@ def _record(row: asyncpg.Record) -> WorkflowRecord:
     return WorkflowRecord(**dict(row))
 
 
-UNREACHABLE = (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError)
+# What says "the database cannot do this right now" rather than "this value or this statement is wrong": a lost or
+# refused connection (SQLSTATE class 08), exhausted resources (53), an operator or shutdown (57), a deadlock or
+# serialisation failure (40), and the client-side equivalents. Only these are retried as outages.
+UNREACHABLE = (
+    asyncpg.exceptions.PostgresConnectionError,
+    asyncpg.exceptions.InsufficientResourcesError,
+    asyncpg.exceptions.OperatorInterventionError,
+    asyncpg.exceptions.TransactionRollbackError,
+    asyncpg.InterfaceError,
+    OSError,
+    TimeoutError,
+)
 
 
 def _journalled[**P, R](method: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]:
@@ -112,6 +130,10 @@ def _journalled[**P, R](method: Callable[P, Coroutine[Any, Any, R]]) -> Callable
     Without this, a dropped connection inside ``ctx.step`` would surface in the workflow as an ordinary exception, and
     the worker would record it as the workflow's failure: an outage would permanently fail every workflow that was
     running through it.
+
+    The opposite mistake matters as much. A value Postgres refuses (a NUL inside a string, say) fails the same way on
+    every attempt, so it becomes :class:`UnstorableValue`, an ordinary exception the workflow sees and fails on, instead
+    of an "outage" that re-runs the activity on every lease forever.
     """
 
     @functools.wraps(method)
@@ -120,6 +142,8 @@ def _journalled[**P, R](method: Callable[P, Coroutine[Any, Any, R]]) -> Callable
             return await method(*args, **kwargs)
         except UNREACHABLE as exc:
             raise JournalUnavailable(f"{type(exc).__name__}: {exc}") from exc
+        except asyncpg.exceptions.DataError as exc:
+            raise UnstorableValue(f"{type(exc).__name__}: {exc}") from exc
 
     return translated
 
@@ -198,14 +222,15 @@ class RunJournal:
     # Journal
 
     @_journalled
-    async def append(self, seq: int, kind: str, name: str, payload: Json) -> None:
-        # The hot path, once per step, so it is one statement and one round trip.
+    async def append(self, seq: int, kind: str, name: str, payload: Json) -> Json:
+        # The hot path, once per step, so it is one statement and one round trip. It returns the payload as stored,
+        # because jsonb normalises (object keys come back sorted) and the live run must see what a replay will see.
         try:
             async with self._pool.acquire() as conn:
-                written = await conn.fetchval(
+                written = await conn.fetchrow(
                     f"with owner as ({_OWNED}) "  # noqa: S608  # a constant, not a value
                     "insert into ratchet_events (workflow_id, seq, kind, name, payload)"
-                    " select $1, $3, $4, $5, $6 from owner returning 1",
+                    " select $1, $3, $4, $5, $6 from owner returning payload",
                     *self._key,
                     seq,
                     kind,
@@ -217,6 +242,7 @@ class RunJournal:
             raise LeaseLost(self.claim.workflow_id) from None
         if written is None:
             raise LeaseLost(self.claim.workflow_id)
+        return written["payload"]
 
     @_journalled
     async def append_now(self, seq: int) -> datetime:
@@ -247,14 +273,26 @@ class RunJournal:
             return row["deadline"], row["now"]
 
     @_journalled
-    async def take_signal(self, seq: int, name: str) -> tuple[bool, Json]:
+    async def take_signal(self, seq: int, name: str, accept: Callable[[Json], bool]) -> tuple[bool, Json]:
         async with self._owned() as conn:
-            signal = await conn.fetchrow(
-                "select id, payload from ratchet_signals"
-                " where workflow_id = $1 and name = $2 and consumed_seq is null order by id limit 1 for update",
+            pending = await conn.fetch(
+                "select id, payload from ratchet_signals where workflow_id = $1 and name = $2"
+                " and consumed_seq is null and rejected_at is null order by id for update",
                 self.claim.workflow_id,
                 name,
             )
+            rejected = []
+            signal = None
+            for candidate in pending:
+                if accept(candidate["payload"]):
+                    signal = candidate
+                    break
+                rejected.append(candidate["id"])
+            if rejected:
+                # Kept for inspection, never delivered. A malformed request must not fail the workflow waiting for it.
+                await conn.execute(
+                    "update ratchet_signals set rejected_at = now() where id = any($1::bigint[])", rejected
+                )
             if signal is None:
                 return False, None
             await conn.execute("update ratchet_signals set consumed_seq = $2 where id = $1", signal["id"], seq)

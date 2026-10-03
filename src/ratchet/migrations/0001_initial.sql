@@ -47,11 +47,13 @@ create table ratchet_signals (
     payload      jsonb,
     dedupe_key   text,
     consumed_seq integer,
+    rejected_at  timestamptz,  -- the payload did not validate against what the workflow waits for; never delivered
     sent_at      timestamptz not null default now(),
     unique (workflow_id, dedupe_key)
 );
 
-create index ratchet_signals_pending on ratchet_signals (workflow_id, name, id) where consumed_seq is null;
+create index ratchet_signals_pending on ratchet_signals (workflow_id, name, id)
+    where consumed_seq is null and rejected_at is null;
 
 -- Failed attempts of a step that will be retried. Mutable on purpose: it is bookkeeping, not history. The final
 -- outcome, success or failure, goes into ratchet_events like any other.

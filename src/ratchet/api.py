@@ -20,6 +20,7 @@ from ratchet.settings import Settings
 from ratchet.store import Status, Store, WorkflowRecord, create_pool
 
 _ID_PATTERN = r"^[A-Za-z0-9._:\-]{1,200}$"
+MIN_TOKEN_LENGTH = 16
 _NAME_PATTERN = r"^[A-Za-z0-9._\-]{1,100}$"
 
 type Lifespan = Callable[[FastAPI], contextlib.AbstractAsyncContextManager[None]]
@@ -152,6 +153,9 @@ type _Client = Annotated[Client, Depends(_client)]
 def build_app(token: str, max_payload_bytes: int, lifespan: Lifespan | None = None) -> FastAPI:
     """The app without its resources. Whoever runs it puts a ``Client`` and a ``ready`` probe on ``app.state``."""
     app = FastAPI(title="ratchet", version="0.1.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
+    if len(token) < MIN_TOKEN_LENGTH:
+        # An empty token would match a request with no Authorization header at all.
+        raise ValueError(f"the API token must be at least {MIN_TOKEN_LENGTH} characters")
     bearer = HTTPBearer(auto_error=False)
     expected = token.encode()
 
