@@ -50,14 +50,14 @@ engine can promise more on its own.
 
 ## Numbers
 
-On a laptop (Core Ultra 7 255H, Postgres 18 in Docker Desktop, four worker processes), full details in
-[docs/benchmark-results](docs/benchmark-results/2026-10-03-laptop.md):
+Four worker processes, three no-op steps per workflow, Postgres 18 on the same machine. Full details, and the run-to-run
+spread, in [docs/benchmark-results](docs/benchmark-results/):
 
-| | result |
-|---|---|
-| draining 5,000 three-step workflows | 896 workflows/s, 2,689 steps/s |
-| 200 workflows/s, open loop, start to finish | p50 22 ms, p95 100 ms, p99 203 ms |
-| replaying a recorded history on wake | 1.3 microseconds per step |
+| | GitHub runner (EPYC 7763, 4 vCPU, Linux) | laptop (Core Ultra 7 255H, Docker Desktop) |
+|---|---|---|
+| draining 5,000 workflows | 863 workflows/s, 2,589 steps/s | 896 workflows/s, 2,689 steps/s |
+| 200 workflows/s, open loop, start to finish | p50 5 ms, p95 10 ms, p99 170 ms | p50 22 ms, p95 100 ms, p99 203 ms |
+| replaying a recorded history on wake | 1.0 microseconds per step | 1.3 microseconds per step |
 
 Before the first release, a review set on breaking it found twelve problems, nine of them
 confirmed by probes. Each fix came with a test that failed before it; they are collected in
