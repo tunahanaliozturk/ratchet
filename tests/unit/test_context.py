@@ -1,6 +1,8 @@
 """Replay rules, against an in-memory journal. The Postgres side of the same promises is in tests/integration."""
 
 import asyncio
+import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -26,14 +28,18 @@ class MemoryJournal:
         self.events: dict[int, Event] = {}
         self.retries: dict[int, tuple[int, timedelta]] = {}
         self.signals = signals or {}
+        self.rejected: list[Any] = []
         self.now = T0
 
     def _put(self, seq: int, kind: str, name: str, payload: Any) -> None:
         assert seq not in self.events, f"position {seq} written twice"
         self.events[seq] = Event(seq, kind, name, payload)
 
-    async def append(self, seq: int, kind: str, name: str, payload: Any) -> None:
-        self._put(seq, kind, name, payload)
+    async def append(self, seq: int, kind: str, name: str, payload: Any) -> Any:
+        # Postgres jsonb hands objects back with their keys reordered; so does this, to keep the tests honest.
+        stored = json.loads(json.dumps(payload, sort_keys=True))
+        self._put(seq, kind, name, stored)
+        return stored
 
     async def append_now(self, seq: int) -> datetime:
         self._put(seq, "now", "now", self.now.isoformat())
@@ -46,13 +52,15 @@ class MemoryJournal:
         self._put(seq, kind, name, {"deadline": None if deadline is None else deadline.isoformat()})
         return deadline, self.now
 
-    async def take_signal(self, seq: int, name: str) -> tuple[bool, Any]:
+    async def take_signal(self, seq: int, name: str, accept: Callable[[Any], bool]) -> tuple[bool, Any]:
         queue = self.signals.get(name) or []
-        if not queue:
-            return False, None
-        payload = queue.pop(0)
-        self._put(seq, "signal", name, payload)
-        return True, payload
+        while queue:
+            payload = queue.pop(0)
+            if accept(payload):
+                self._put(seq, "signal", name, payload)
+                return True, payload
+            self.rejected.append(payload)
+        return False, None
 
     async def schedule_retry(self, seq: int, attempts: int, delay: timedelta, error: Any) -> datetime:
         self.retries[seq] = (attempts, delay)

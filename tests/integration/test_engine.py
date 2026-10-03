@@ -174,14 +174,14 @@ async def test_a_signal_landing_between_the_check_and_the_park_is_not_lost(store
     journal = store.journal(claim, timedelta(seconds=30))
     await journal.load()
     await journal.append_deadline(0, "signal_wait", "decision", timedelta(minutes=5))
-    assert await journal.take_signal(1, "decision") == (False, None)
+    assert await journal.take_signal(1, "decision", lambda _: True) == (False, None)
 
     await client.signal("race", "decision", "late")  # after the check, before the park
 
     assert not await journal.suspend(None, frozenset({"decision"})), "parking now would sleep through the signal"
     state = await journal.load()
     assert state.history.keys() == {0}
-    assert await journal.take_signal(1, "decision") == (True, "late")
+    assert await journal.take_signal(1, "decision", lambda _: True) == (True, "late")
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -256,7 +256,7 @@ async def test_every_fenced_write_refuses_a_stale_fence(pool: asyncpg.Pool, stor
         stale.append(0, "step", "add", {"result": 1}),
         stale.append_now(0),
         stale.append_deadline(0, "timer", "sleep", timedelta(seconds=1)),
-        stale.take_signal(0, "x"),
+        stale.take_signal(0, "x", lambda _: True),
         stale.schedule_retry(0, 1, timedelta(seconds=1), {}),
         stale.finish("completed", 1, None),
         stale.suspend(None, frozenset()),
