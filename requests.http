@@ -1,0 +1,83 @@
+# Try these against `docker compose up` in the order they appear. The token matches compose.yaml.
+@base = http://127.0.0.1:8200
+@auth = Bearer local-dev-token
+
+### 1. A small order: reserved, charged and shipped within a second or so.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-1", "input": {"order_id": "order-1", "sku": "KB-01", "quantity": 1, "amount": "120.00"}}
+
+### 2. Its status and result. Run it again after a moment if it still says "ready".
+GET {{base}}/v1/workflows/order-1
+Authorization: {{auth}}
+
+### 3. Its history: one row per recorded outcome, in the order the code asked for them.
+GET {{base}}/v1/workflows/order-1/history
+Authorization: {{auth}}
+
+### 4. Sending the same start again is safe: 200 and the original, not a second order.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-1", "input": {"order_id": "order-1", "sku": "KB-01", "quantity": 1, "amount": "120.00"}}
+
+### 5. Same id, different input: 409. An id means one workflow.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-1", "input": {"order_id": "order-1", "sku": "KB-01", "quantity": 2, "amount": "240.00"}}
+
+### 6. A flaky payment provider: two timeouts, then success. The history shows one charge; the worker logs show three
+### attempts carrying the same idempotency key.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-2", "input": {"order_id": "order-2", "sku": "KB-01", "quantity": 1, "amount": "80.00", "card": "flaky"}}
+
+### 7. A declined card: no retries (it is a NonRetryableError), the stock is released, the workflow fails.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-3", "input": {"order_id": "order-3", "sku": "KB-01", "quantity": 1, "amount": "80.00", "card": "declined"}}
+
+### 8. A large order. It parks waiting for an "approval" signal, for up to 24 hours, holding no worker while it waits.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-4", "input": {"order_id": "order-4", "sku": "KB-01", "quantity": 3, "amount": "4200.00"}}
+
+### 9. status "sleeping", waiting_signals ["approval"].
+GET {{base}}/v1/workflows/order-4
+Authorization: {{auth}}
+
+### 10. Approve it. A dedupe key makes a retried request harmless: send it twice and the second says delivered: false.
+POST {{base}}/v1/workflows/order-4/signals/approval
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"payload": {"approved": true, "by": "finance"}, "dedupe_key": "approval-order-4"}
+
+### 11. Another large order, cancelled while it waits: the refund and the release run, newest first.
+POST {{base}}/v1/workflows
+Authorization: {{auth}}
+Content-Type: application/json
+
+{"name": "fulfil_order", "id": "order-5", "input": {"order_id": "order-5", "sku": "KB-01", "quantity": 3, "amount": "4200.00"}}
+
+###
+POST {{base}}/v1/workflows/order-5/cancel
+Authorization: {{auth}}
+
+### 12. Everything that failed, oldest first. Pass `next` as `after` for the following page.
+GET {{base}}/v1/workflows?status=failed&limit=20
+Authorization: {{auth}}
+
+### 13. Without a token: 401, as a problem+json body.
+GET {{base}}/v1/workflows
