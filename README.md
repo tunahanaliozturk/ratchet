@@ -1,5 +1,7 @@
 # ratchet
 
+[![ci](https://github.com/tunahanaliozturk/ratchet/actions/workflows/ci.yml/badge.svg)](https://github.com/tunahanaliozturk/ratchet/actions/workflows/ci.yml)
+
 Durable workflows for async Python, with Postgres as the only moving part.
 
 You write a workflow as an ordinary `async def`. Ratchet records the outcome of every step in Postgres, so when a
